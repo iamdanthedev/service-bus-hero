@@ -83,37 +83,144 @@ func FetchTopicSubscriptionStats(connStr string, topic string, subscription stri
 	return &subscriptionProps.SubscriptionRuntimeProperties, nil
 }
 
-func FetchDLQMessages(connStr string, topic string, subscription string) ([]*azservicebus.ReceivedMessage, error) {
-	client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
+func GetDLQMessageCount(connStr string, topic string, subscription string) (int, error) {
+	client, err := admin.NewClientFromConnectionString(connStr, nil)
 	if err != nil {
-		return nil, fmt.Errorf("could not create service bus client: %w", err)
+		return 0, fmt.Errorf("could not create service bus admin client: %w", err)
 	}
 
-	// Create a receiver for the DLQ. Note: Ensure to use the correct path for the DLQ.
-	// The DLQ path typically follows the format "<topic-name>/Subscriptions/<subscription-name>/$DeadLetterQueue"
-	receiver, err := client.NewReceiverForSubscription(
-		topic,
-		subscription,
-		&azservicebus.ReceiverOptions{
-			SubQueue:    azservicebus.SubQueueDeadLetter,
-			ReceiveMode: azservicebus.ReceiveModePeekLock,
-		},
-	)
+	ctx := context.Background()
+	subscriptionProps, err := client.GetSubscriptionRuntimeProperties(ctx, topic, subscription, nil)
 	if err != nil {
-		return nil, fmt.Errorf("could not create receiver for DLQ: %w", err)
+		return 0, fmt.Errorf("could not fetch subscription runtime properties: %w", err)
 	}
-	defer receiver.Close(context.Background()) // Ensure the receiver is closed after usage
 
-	var messages []*azservicebus.ReceivedMessage
+	return int(subscriptionProps.DeadLetterMessageCount), nil
+}
+
+func FetchDLQMessages(connStr string, topic string, subscription string, receiveMode azservicebus.ReceiveMode) (<-chan *azservicebus.ReceivedMessage, <-chan error) {
+	messageChan := make(chan *azservicebus.ReceivedMessage)
+	errorChan := make(chan error, 1) // Buffered channel for at most one error
+
+	go func() {
+		defer close(messageChan)
+		defer close(errorChan)
+
+		client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
+		if err != nil {
+			errorChan <- fmt.Errorf("could not create service bus client: %w", err)
+			return
+		}
+
+		receiver, err := client.NewReceiverForSubscription(
+			topic,
+			subscription,
+			&azservicebus.ReceiverOptions{
+				SubQueue:    azservicebus.SubQueueDeadLetter,
+				ReceiveMode: receiveMode,
+			},
+		)
+		if err != nil {
+			errorChan <- fmt.Errorf("could not create receiver for DLQ: %w", err)
+			return
+		}
+		defer receiver.Close(context.Background())
+
+		ctx := context.Background()
+
+		dlqMessageCount, err := GetDLQMessageCount(connStr, topic, subscription)
+		if err != nil {
+			errorChan <- fmt.Errorf("could not fetch DLQ message count: %w", err)
+			return
+		}
+
+		fmt.Printf("Found %d messages in DLQ\n", dlqMessageCount)
+
+		downloadCount := 0
+		maxBatchSize := 25
+
+		// Now attempt to receive that many messages. Understand that the actual number may vary.
+		for downloadCount < dlqMessageCount {
+			receivedMessages, err := receiver.ReceiveMessages(ctx, maxBatchSize, &azservicebus.ReceiveMessagesOptions{})
+			if err != nil {
+				errorChan <- fmt.Errorf("could not receive messages from DLQ: %w", err)
+				return
+			}
+
+			downloadCount += len(receivedMessages)
+
+			for _, msg := range receivedMessages {
+				messageChan <- msg
+			}
+
+			fmt.Printf("Downloaded %d messages\n", downloadCount)
+
+			if len(receivedMessages) == 0 {
+				break
+			}
+		}
+	}()
+
+	return messageChan, errorChan
+}
+
+func PublishMessagesToTopic(connString string, topic string, messageChan <-chan *azservicebus.Message) error {
+	client, err := azservicebus.NewClientFromConnectionString(connString, nil)
+	if err != nil {
+		return fmt.Errorf("could not create service bus client: %w", err)
+	}
+
+	sender, err := client.NewSender(topic, nil)
+	if err != nil {
+		return fmt.Errorf("could not create sender for topic: %w", err)
+	}
+	defer sender.Close(context.Background())
+
 	ctx := context.Background()
 
-	// Attempt to receive messages. Adjust the number of messages and the maximum wait time as needed.
-	receivedMessages, err := receiver.ReceiveMessages(ctx, 10, nil)
+	batch, err := sender.NewMessageBatch(ctx, &azservicebus.MessageBatchOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("could not receive messages from DLQ: %w", err)
+		return fmt.Errorf("could not create message batch: %w", err)
 	}
 
-	messages = append(messages, receivedMessages...)
+	sentItems := 0
 
-	return messages, nil
+	for msg := range messageChan {
+		if err := batch.AddMessage(msg, &azservicebus.AddMessageOptions{}); err != nil {
+			return fmt.Errorf("could not add message to batch: %w", err)
+		}
+
+		if batch.NumMessages() == 100 {
+			if err := sender.SendMessageBatch(ctx, batch, &azservicebus.SendMessageBatchOptions{}); err != nil {
+				return fmt.Errorf("could not send message batch: %w", err)
+			}
+
+			sentItems += int(batch.NumMessages())
+			fmt.Printf("Sent %d messages\n", sentItems)
+
+			batch, err = sender.NewMessageBatch(ctx, &azservicebus.MessageBatchOptions{})
+			if err != nil {
+				return fmt.Errorf("could not create message batch: %w", err)
+			}
+		}
+	}
+
+	if batch.NumMessages() > 0 {
+		if err := sender.SendMessageBatch(ctx, batch, &azservicebus.SendMessageBatchOptions{}); err != nil {
+			return fmt.Errorf("could not send message batch: %w", err)
+		}
+
+		sentItems += int(batch.NumMessages())
+		fmt.Printf("Sent %d messages\n", sentItems)
+	}
+
+	return nil
+
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

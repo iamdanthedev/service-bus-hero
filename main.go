@@ -1,8 +1,10 @@
 package main
 
 import (
-	"errors"
 	"fmt"
+	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
+	"github.com/joho/godotenv"
+	"log"
 	"os"
 	"service-bus-hero/prompts"
 )
@@ -56,10 +58,10 @@ func listCommands() {
 			},
 		},
 		{
-			Name:        "Download DLQ Messages",
-			Description: "Downloads messages from Azure Service Bus DLQ.",
+			Name:        "Download DLQ Messages (PeekLock)",
+			Description: "Downloads messages in peek-lock mode",
 			Action: func() error {
-				err := WriteDLQMessagesToFile()
+				err := WriteDLQMessagesToFile(azservicebus.ReceiveModePeekLock)
 				if err != nil {
 					return fmt.Errorf("could not write DLQ messages to file: %w", err)
 				}
@@ -70,10 +72,31 @@ func listCommands() {
 			},
 		},
 		{
-			Name:        "Process Messages",
-			Description: "Processes messages in some way.",
+			Name:        "Download DLQ Messages (ReceiveAndDelete)",
+			Description: "Downloads messages from DLQ and __REMOVES__ them from the queue.",
 			Action: func() error {
-				return errors.New("not implemented")
+				err := WriteDLQMessagesToFile(azservicebus.ReceiveModeReceiveAndDelete)
+				if err != nil {
+					return fmt.Errorf("could not write DLQ messages to file: %w", err)
+				}
+
+				listCommands()
+
+				return nil
+			},
+		},
+		{
+			Name:        "Publish Messages to topic",
+			Description: "Publishes messages to a topic.",
+			Action: func() error {
+				err := PublishMessages()
+				if err != nil {
+					return fmt.Errorf("could not publish messages: %w", err)
+				}
+
+				listCommands()
+
+				return nil
 			},
 		},
 		{
@@ -99,7 +122,19 @@ func listCommands() {
 	prompts.PromptCommandList(commands)
 }
 
+func processEnv() {
+	// Load the .env file
+	err := godotenv.Load() // This will look for a ".env" file in the current directory
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
+
+	appContext.ConnectionString = os.Getenv("SBHERO_CONNECTION_STRING")
+	appContext.Topic = os.Getenv("SBHERO_TOPIC")
+}
+
 func main() {
+	processEnv()
 	GetConnectionString()
 	listCommands()
 }

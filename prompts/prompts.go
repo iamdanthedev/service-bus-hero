@@ -97,3 +97,30 @@ func PromptFileName(defaultValue *string) (string, error) {
 
 	return result, nil
 }
+
+func SelectFileOrCustom(filenames []string) (string, error) {
+	prompt := promptui.Select{
+		Label: "Select a file or enter a custom file name",
+		Items: filenames,
+	}
+
+	_, result, err := prompt.Run()
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+
+	return result, nil
+}
+
+func EnterCustomFileName() (string, error) {
+	prompt := promptui.Prompt{
+		Label: "Enter a custom file name",
+	}
+
+	result, err := prompt.Run()
+	if err != nil {
+		return "", fmt.Errorf("prompt failed: %w", err)
+	}
+
+	return result, nil
+}
