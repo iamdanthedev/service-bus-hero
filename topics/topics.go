@@ -218,6 +218,144 @@ func PublishMessagesToTopic(connString string, topic string, messageChan <-chan 
 
 }
 
+func ResendDLQMessages(connStr string, topic string, subscription string) (int, error) {
+	client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
+	if err != nil {
+		return 0, fmt.Errorf("could not create service bus client: %w", err)
+	}
+
+	receiver, err := client.NewReceiverForSubscription(
+		topic,
+		subscription,
+		&azservicebus.ReceiverOptions{
+			SubQueue:    azservicebus.SubQueueDeadLetter,
+			ReceiveMode: azservicebus.ReceiveModeReceiveAndDelete,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("could not create receiver for DLQ: %w", err)
+	}
+	defer receiver.Close(context.Background())
+
+	sender, err := client.NewSender(topic, nil)
+	if err != nil {
+		return 0, fmt.Errorf("could not create sender for topic: %w", err)
+	}
+	defer sender.Close(context.Background())
+
+	ctx := context.Background()
+
+	dlqMessageCount, err := GetDLQMessageCount(connStr, topic, subscription)
+	if err != nil {
+		return 0, fmt.Errorf("could not fetch DLQ message count: %w", err)
+	}
+
+	if dlqMessageCount == 0 {
+		return 0, nil
+	}
+
+	processedCount := 0
+	maxBatchSize := 25
+
+	for processedCount < dlqMessageCount {
+		receivedMessages, err := receiver.ReceiveMessages(ctx, maxBatchSize, nil)
+		if err != nil {
+			return processedCount, fmt.Errorf("could not receive messages from DLQ: %w", err)
+		}
+
+		if len(receivedMessages) == 0 {
+			break
+		}
+
+		batch, err := sender.NewMessageBatch(ctx, nil)
+		if err != nil {
+			return processedCount, fmt.Errorf("could not create message batch: %w", err)
+		}
+
+		for _, msg := range receivedMessages {
+			newMsg := &azservicebus.Message{
+				Body:                  msg.Body,
+				Subject:               msg.Subject,
+				CorrelationID:         msg.CorrelationID,
+				ApplicationProperties: msg.ApplicationProperties,
+			}
+
+			if err := batch.AddMessage(newMsg, nil); err != nil {
+				// If batch is full, send it and create a new one
+				if err := sender.SendMessageBatch(ctx, batch, nil); err != nil {
+					return processedCount, fmt.Errorf("could not send message batch: %w", err)
+				}
+				batch, err = sender.NewMessageBatch(ctx, nil)
+				if err != nil {
+					return processedCount, fmt.Errorf("could not create message batch: %w", err)
+				}
+				if err := batch.AddMessage(newMsg, nil); err != nil {
+					return processedCount, fmt.Errorf("could not add message to batch: %w", err)
+				}
+			}
+		}
+
+		if batch.NumMessages() > 0 {
+			if err := sender.SendMessageBatch(ctx, batch, nil); err != nil {
+				return processedCount, fmt.Errorf("could not send message batch: %w", err)
+			}
+		}
+
+		processedCount += len(receivedMessages)
+	}
+
+	return processedCount, nil
+}
+
+func ClearDLQMessages(connStr string, topic string, subscription string) (int, error) {
+	client, err := azservicebus.NewClientFromConnectionString(connStr, nil)
+	if err != nil {
+		return 0, fmt.Errorf("could not create service bus client: %w", err)
+	}
+
+	receiver, err := client.NewReceiverForSubscription(
+		topic,
+		subscription,
+		&azservicebus.ReceiverOptions{
+			SubQueue:    azservicebus.SubQueueDeadLetter,
+			ReceiveMode: azservicebus.ReceiveModeReceiveAndDelete,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("could not create receiver for DLQ: %w", err)
+	}
+	defer receiver.Close(context.Background())
+
+	ctx := context.Background()
+
+	dlqMessageCount, err := GetDLQMessageCount(connStr, topic, subscription)
+	if err != nil {
+		return 0, fmt.Errorf("could not fetch DLQ message count: %w", err)
+	}
+
+	if dlqMessageCount == 0 {
+		return 0, nil
+	}
+
+	processedCount := 0
+	maxBatchSize := 25
+
+	for processedCount < dlqMessageCount {
+		receivedMessages, err := receiver.ReceiveMessages(ctx, maxBatchSize, nil)
+		if err != nil {
+			return processedCount, fmt.Errorf("could not receive messages from DLQ: %w", err)
+		}
+
+		if len(receivedMessages) == 0 {
+			break
+		}
+
+		processedCount += len(receivedMessages)
+	}
+
+	return processedCount, nil
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

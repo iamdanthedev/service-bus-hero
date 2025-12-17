@@ -71,7 +71,7 @@ func ListTopicStatByTopics() error {
 	fmt.Fprintln(w, "Topic\tSubscription\tActive Messages\tDLQ Messages\t")
 
 	for _, topic := range allTopics {
-		err = WriteTopicSubscriptionsStats(w, topic)
+		err = WriteTopicSubscriptionsStats(w, topic, false)
 		if err != nil {
 			return fmt.Errorf("could not write topic subscription stats: %w", err)
 		}
@@ -85,7 +85,31 @@ func ListTopicStatByTopics() error {
 	return nil
 }
 
-func WriteTopicSubscriptionsStats(w *tabwriter.Writer, topic string) error {
+func ListDLQStats() error {
+	allTopics, err := topics.FetchTopics(appContext.ConnectionString)
+	if err != nil {
+		return fmt.Errorf("could not fetch topics: %w", err)
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 8, 4, '\t', 0)
+	fmt.Fprintln(w, "Topic\tSubscription\tActive Messages\tDLQ Messages\t")
+
+	for _, topic := range allTopics {
+		err = WriteTopicSubscriptionsStats(w, topic, true)
+		if err != nil {
+			return fmt.Errorf("could not write topic subscription stats: %w", err)
+		}
+	}
+
+	// Ensure all data is flushed to standard output
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("could not flush writer: %w", err)
+	}
+
+	return nil
+}
+
+func WriteTopicSubscriptionsStats(w *tabwriter.Writer, topic string, dlqOnly bool) error {
 	allSubscriptions, err := topics.FetchTopicSubscriptions(appContext.ConnectionString, topic)
 	if err != nil {
 		return fmt.Errorf("could not fetch subscriptions: %w", err)
@@ -95,6 +119,10 @@ func WriteTopicSubscriptionsStats(w *tabwriter.Writer, topic string) error {
 		subscriptionStats, err := topics.FetchTopicSubscriptionStats(appContext.ConnectionString, topic, subscription)
 		if err != nil {
 			return fmt.Errorf("could not fetch subscription stat: %w", err)
+		}
+
+		if dlqOnly && subscriptionStats.DeadLetterMessageCount == 0 {
+			continue
 		}
 
 		// Write each subscription's stats in a row
@@ -161,6 +189,92 @@ func WriteDLQMessagesToFile(receiveMode azservicebus.ReceiveMode) error {
 
 	fmt.Printf("%d messages written to file: %s\n", totalMessages, fileName)
 
+	return nil
+}
+
+func ResendAllDLQMessages() error {
+	allTopics, err := topics.FetchTopics(appContext.ConnectionString)
+	if err != nil {
+		return fmt.Errorf("could not fetch topics: %w", err)
+	}
+
+	totalResent := 0
+
+	for _, topic := range allTopics {
+		subscriptions, err := topics.FetchTopicSubscriptions(appContext.ConnectionString, topic)
+		if err != nil {
+			fmt.Printf("Error fetching subscriptions for topic %s: %v\n", topic, err)
+			continue
+		}
+
+		for _, subscription := range subscriptions {
+			stats, err := topics.FetchTopicSubscriptionStats(appContext.ConnectionString, topic, subscription)
+			if err != nil {
+				fmt.Printf("Error fetching stats for %s/%s: %v\n", topic, subscription, err)
+				continue
+			}
+
+			if stats.DeadLetterMessageCount == 0 {
+				continue
+			}
+
+			fmt.Printf("Resending %d DLQ messages from %s/%s...\n", stats.DeadLetterMessageCount, topic, subscription)
+
+			count, err := topics.ResendDLQMessages(appContext.ConnectionString, topic, subscription)
+			if err != nil {
+				fmt.Printf("Error resending DLQ messages for %s/%s: %v\n", topic, subscription, err)
+				continue
+			}
+
+			totalResent += count
+			fmt.Printf("Resent %d messages from %s/%s\n", count, topic, subscription)
+		}
+	}
+
+	fmt.Printf("\nTotal messages resent: %d\n", totalResent)
+	return nil
+}
+
+func ClearAllDLQMessages() error {
+	allTopics, err := topics.FetchTopics(appContext.ConnectionString)
+	if err != nil {
+		return fmt.Errorf("could not fetch topics: %w", err)
+	}
+
+	totalCleared := 0
+
+	for _, topic := range allTopics {
+		subscriptions, err := topics.FetchTopicSubscriptions(appContext.ConnectionString, topic)
+		if err != nil {
+			fmt.Printf("Error fetching subscriptions for topic %s: %v\n", topic, err)
+			continue
+		}
+
+		for _, subscription := range subscriptions {
+			stats, err := topics.FetchTopicSubscriptionStats(appContext.ConnectionString, topic, subscription)
+			if err != nil {
+				fmt.Printf("Error fetching stats for %s/%s: %v\n", topic, subscription, err)
+				continue
+			}
+
+			if stats.DeadLetterMessageCount == 0 {
+				continue
+			}
+
+			fmt.Printf("Clearing %d DLQ messages from %s/%s...\n", stats.DeadLetterMessageCount, topic, subscription)
+
+			count, err := topics.ClearDLQMessages(appContext.ConnectionString, topic, subscription)
+			if err != nil {
+				fmt.Printf("Error clearing DLQ messages for %s/%s: %v\n", topic, subscription, err)
+				continue
+			}
+
+			totalCleared += count
+			fmt.Printf("Cleared %d messages from %s/%s\n", count, topic, subscription)
+		}
+	}
+
+	fmt.Printf("\nTotal messages cleared: %d\n", totalCleared)
 	return nil
 }
 

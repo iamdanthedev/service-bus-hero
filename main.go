@@ -28,6 +28,20 @@ func listCommands() {
 			},
 		},
 		{
+			Name:        "DLQ stats",
+			Description: "List stats for subscriptions with DLQ messages.",
+			Action: func() error {
+				err := ListDLQStats()
+				if err != nil {
+					return fmt.Errorf("could not list DLQ stats: %w", err)
+				}
+
+				listCommands()
+
+				return nil
+			},
+		},
+		{
 			Name:        "Select Topic",
 			Description: "Selects a topic to work with.",
 			Action: func() error {
@@ -92,6 +106,34 @@ func listCommands() {
 				err := PublishMessages()
 				if err != nil {
 					return fmt.Errorf("could not publish messages: %w", err)
+				}
+
+				listCommands()
+
+				return nil
+			},
+		},
+		{
+			Name:        "Resend All DLQ Messages",
+			Description: "Resends all DLQ messages from all subscriptions back to their topics.",
+			Action: func() error {
+				err := ResendAllDLQMessages()
+				if err != nil {
+					return fmt.Errorf("could not resend all DLQ messages: %w", err)
+				}
+
+				listCommands()
+
+				return nil
+			},
+		},
+		{
+			Name:        "Clear All DLQ Messages",
+			Description: "Clears (deletes) all DLQ messages from all subscriptions.",
+			Action: func() error {
+				err := ClearAllDLQMessages()
+				if err != nil {
+					return fmt.Errorf("could not clear all DLQ messages: %w", err)
 				}
 
 				listCommands()
